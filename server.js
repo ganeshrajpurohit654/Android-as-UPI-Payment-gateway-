@@ -14,7 +14,7 @@ app.set('trust proxy', 1);
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public')); // Serve static files
+app.use(express.static('public'));
 
 // Enhanced Logger
 const logger = winston.createLogger({
@@ -41,10 +41,20 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Firebase Init
-const serviceAccount = require('./serviceAccountKey.json');
+// Firebase Init from environment variables
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
+  credential: admin.credential.cert({
+    type: process.env.FIREBASE_TYPE,
+    project_id: process.env.FIREBASE_PROJECT_ID,
+    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    client_email: process.env.FIREBASE_CLIENT_EMAIL,
+    client_id: process.env.FIREBASE_CLIENT_ID,
+    auth_uri: process.env.FIREBASE_AUTH_URI,
+    token_uri: process.env.FIREBASE_TOKEN_URI,
+    auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_CERT_URL,
+    client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL
+  })
 });
 const db = admin.firestore();
 
@@ -91,7 +101,7 @@ app.post('/generate-qr', async (req, res) => {
   // Generate transaction reference
   const txnRef = `BB-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
   const upiId = process.env.UPI_ID;
-  const businessName = 'Simple Payment Gateway';
+  const businessName = process.env.BUSINESS_NAME || 'Simple Payment Gateway';
   const upiLink = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(businessName)}&am=${amount}&cu=INR&tn=${txnRef}`;
 
   // Create payment session
