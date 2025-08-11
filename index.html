@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Railway UPI Payment</title>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+<div class="bg-white p-8 rounded-xl shadow-md w-full max-w-md">
+  <h1 class="text-2xl font-bold mb-4 text-center">🚆 Railway UPI Payment</h1>
+
+  <!-- Input form -->
+  <div id="payment-form">
+    <input id="email" type="email" placeholder="Enter your email" class="border p-2 w-full mb-2 rounded" />
+    <input id="amount" type="number" placeholder="Enter amount" class="border p-2 w-full mb-2 rounded" />
+    <button onclick="generateQR()" class="bg-blue-600 text-white px-4 py-2 rounded w-full">Generate Payment</button>
+  </div>
+
+  <!-- QR section -->
+  <div id="qr-section" class="hidden text-center">
+    <h2 class="text-lg font-semibold mt-4">Scan to Pay</h2>
+    <img id="qr-image" class="mx-auto my-4 w-48 h-48" />
+    <p class="text-sm text-gray-600">Transaction Ref: <span id="txn-ref"></span></p>
+    <p class="text-red-500 font-bold mt-2">Expires in <span id="countdown">05:00</span></p>
+
+    <div class="mt-3 space-x-2">
+      <a id="gpay-link" target="_blank" class="bg-green-500 text-white px-3 py-1 rounded">Google Pay</a>
+      <a id="phonepe-link" target="_blank" class="bg-purple-500 text-white px-3 py-1 rounded">PhonePe</a>
+      <a id="paytm-link" target="_blank" class="bg-yellow-500 text-white px-3 py-1 rounded">Paytm</a>
+    </div>
+
+    <button onclick="simulatePayment()" class="mt-4 bg-orange-500 text-white px-3 py-1 rounded">Simulate Payment</button>
+  </div>
+
+  <!-- Success section -->
+  <div id="success-section" class="hidden text-center mt-4">
+    <h2 class="text-green-600 text-xl font-bold">✅ Payment Successful!</h2>
+  </div>
+
+  <!-- Expired section -->
+  <div id="expired-section" class="hidden text-center mt-4">
+    <h2 class="text-red-600 text-xl font-bold">❌ Payment Expired</h2>
+    <button onclick="resetForm()" class="mt-2 bg-blue-500 text-white px-3 py-1 rounded">Try Again</button>
+  </div>
+</div>
+
+<script>
+const backendURL = "https://android-as-upi-payment-gateway-production.up.railway.app";
+let paymentTimer, pollInterval;
+let txnRefGlobal, emailGlobal, amountGlobal, expiryTime;
+
+function generateQR() {
+  const email = document.getElementById("email").value;
+  const amount = parseFloat(document.getElementById("amount").value);
+
+  if (!email || !amount || amount <= 0) {
+    alert("Please enter a valid email and amount.");
+    return;
+  }
+
+  fetch(`${backendURL}/generate-qr`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, amount })
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.error) return alert(data.error);
+
+    document.getElementById("payment-form").classList.add("hidden");
+    document.getElementById("qr-section").classList.remove("hidden");
+
+    document.getElementById("qr-image").src = data.qrImage;
+    document.getElementById("txn-ref").textContent = data.txnRef;
+    document.getElementById("gpay-link").href = data.apps.gpay;
+    document.getElementById("phonepe-link").href = data.apps.phonepe;
+    document.getElementById("paytm-link").href = data.apps.paytm;
+
+    txnRefGlobal = data.txnRef;
+    emailGlobal = email;
+    amountGlobal = amount;
+    expiryTime = Date.now() + data.expiresIn * 1000;
+
+    startCountdown();
+    pollInterval = setInterval(checkStatus, 3000);
+  })
+  .catch(err => alert("Error generating QR: " + err));
+}
+
+function startCountdown() {
+  clearInterval(paymentTimer);
+  paymentTimer = setInterval(() => {
+    const remaining = expiryTime - Date.now();
+    if (remaining <= 0) {
+      clearInterval(paymentTimer);
+      clearInterval(pollInterval);
+      document.getElementById("qr-section").classList.add("hidden");
+      document.getElementById("expired-section").classList.remove("hidden");
+    } else {
+      const mins = String(Math.floor(remaining / 60000)).padStart(2, "0");
+      const secs = String(Math.floor((remaining % 60000) / 1000)).padStart(2, "0");
+      document.getElementById("countdown").textContent = `${mins}:${secs}`;
+    }
+  }, 1000);
+}
+
+function checkStatus() {
+  fetch(`${backendURL}/check-payment-status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: emailGlobal, amount: amountGlobal, txnRef: txnRefGlobal })
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.success) {
+      clearInterval(paymentTimer);
+      clearInterval(pollInterval);
+      document.getElementById("qr-section").classList.add("hidden");
+      document.getElementById("success-section").classList.remove("hidden");
+    }
+  });
+}
+
+function simulatePayment() {
+  fetch(`${backendURL}/payment-webhook`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message: `You have received Rs. ${amountGlobal} from Demo via UPI CREDIT SIMREF`,
+      token: "mysecretkey"
+    })
+  })
+  .then(() => checkStatus());
+}
+
+function resetForm() {
+  document.getElementById("payment-form").classList.remove("hidden");
+  document.getElementById("qr-section").classList.add("hidden");
+  document.getElementById("success-section").classList.add("hidden");
+  document.getElementById("expired-section").classList.add("hidden");
+}
+</script>
+</body>
+</html>
