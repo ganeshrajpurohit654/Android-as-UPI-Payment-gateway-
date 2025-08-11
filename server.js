@@ -41,31 +41,26 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Firebase Init from environment variables
-admin.initializeApp({
-  credential: admin.credential.cert({
-    type: process.env.FIREBASE_TYPE,
-    project_id: process.env.FIREBASE_PROJECT_ID,
-    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-    private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    client_email: process.env.FIREBASE_CLIENT_EMAIL,
-    client_id: process.env.FIREBASE_CLIENT_ID,
-    auth_uri: process.env.FIREBASE_AUTH_URI,
-    token_uri: process.env.FIREBASE_TOKEN_URI,
-    auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_CERT_URL,
-    client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL
-  })
-});
+// Firebase Init from single JSON environment variable
+try {
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+} catch (err) {
+  logger.error('Failed to initialize Firebase Admin', { error: err.message });
+  process.exit(1);
+}
+
 const db = admin.firestore();
 
 // Payment Configuration
 const PAYMENT_TIMEOUT = 300; // 5 minutes in seconds
 const LOCK_TIMEOUT = PAYMENT_TIMEOUT * 1000; // Convert to milliseconds
-
-// In-Memory Lock with enhanced tracking
 const paymentSessions = {};
 
-// Helper: Discord Log (optional)
+// Helper: Discord Log
 const sendDiscordLog = async (msg) => {
   const url = process.env.DISCORD_WEBHOOK_URL;
   if (!url) return;
@@ -79,17 +74,14 @@ const sendDiscordLog = async (msg) => {
 // 📦 Route: Generate QR
 app.post('/generate-qr', async (req, res) => {
   const { email, amount } = req.body;
-  
-  // Validate input
+
   if (!email || !email.includes('@') || !amount || isNaN(amount) || amount <= 0) {
     return res.status(400).json({ error: 'Invalid email or amount' });
   }
 
   const now = Date.now();
-  
-  // Check if this amount is already being processed
   if (paymentSessions[amount] && paymentSessions[amount].expiresAt > now) {
-    return res.status(423).json({ 
+    return res.status(423).json({
       error: 'Payment in progress',
       details: {
         expiresIn: Math.ceil((paymentSessions[amount].expiresAt - now) / 1000),
@@ -98,13 +90,11 @@ app.post('/generate-qr', async (req, res) => {
     });
   }
 
-  // Generate transaction reference
   const txnRef = `BB-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
   const upiId = process.env.UPI_ID;
   const businessName = process.env.BUSINESS_NAME || 'Simple Payment Gateway';
   const upiLink = `upi://pay?pa=${upiId}&pn=${encodeURIComponent(businessName)}&am=${amount}&cu=INR&tn=${txnRef}`;
 
-  // Create payment session
   paymentSessions[amount] = {
     email,
     startedAt: now,
@@ -114,7 +104,6 @@ app.post('/generate-qr', async (req, res) => {
     verificationAttempts: 0
   };
 
-  // Auto-cleanup after timeout
   setTimeout(() => {
     if (paymentSessions[amount]?.txnRef === txnRef) {
       delete paymentSessions[amount];
@@ -122,11 +111,9 @@ app.post('/generate-qr', async (req, res) => {
   }, LOCK_TIMEOUT + 1000);
 
   try {
-    // Generate QR code
     const qrImage = await qrcode.toDataURL(upiLink);
-    
     logger.info('QR generated', { email, amount, txnRef });
-    
+
     res.json({
       upiLink,
       qrImage,
@@ -147,23 +134,20 @@ app.post('/generate-qr', async (req, res) => {
 // 📨 Route: Unified Payment Webhook
 app.post('/payment-webhook', async (req, res) => {
   const { sender, message, notification, token } = req.body;
-  
-  // Validate webhook token
+
   if (token !== process.env.SECRET_KEY) {
     logger.warn('Unauthorized webhook attempt', { ip: req.ip });
     return res.status(403).json({ error: 'Unauthorized' });
   }
 
   let amount, identifier, source, paymentDetails;
-  
+
   try {
-    // Parse payment details based on source
     if (message) {
-      // Process SMS
       source = 'sms';
       const amountMatch = message.match(/(?:\u20B9|INR|Rs\.?)\s*(\d+(?:\.\d{1,2})?)/i);
       const refMatch = message.match(/UPI[\/\s\-]*CREDIT[\/\s\-]*(\w+)/i) || 
-                      message.match(/Ref\s*:\s*(\w+)/i);
+                       message.match(/Ref\s*:\s*(\w+)/i);
 
       if (!amountMatch || !refMatch) {
         return res.status(400).json({ error: 'Missing amount or UPI ref in SMS' });
@@ -172,36 +156,31 @@ app.post('/payment-webhook', async (req, res) => {
       amount = parseFloat(amountMatch[1]);
       identifier = refMatch[1];
       paymentDetails = { sender, amount, upiRef: identifier };
-    } 
-    else if (notification) {
-      // Process Google Pay notification
+    } else if (notification) {
       source = 'gpay';
       const gpayAmountMatch = notification.match(/paid you ₹(\d+(?:\.\d{1,2})?)/i);
       if (!gpayAmountMatch) {
         return res.status(400).json({ error: 'Missing amount in Google Pay notification' });
       }
-      
+
       amount = parseFloat(gpayAmountMatch[1]);
-      identifier = notification.split('\n')[1]; // Extract transaction ID from second line
+      identifier = notification.split('\n')[1];
       if (!identifier) {
         return res.status(400).json({ error: 'Missing transaction ID in Google Pay notification' });
       }
       paymentDetails = { amount, gpayTxnId: identifier };
-    }
-    else {
+    } else {
       return res.status(400).json({ error: 'No valid payment data received' });
     }
 
-    // Find active session for this amount
     const session = paymentSessions[amount];
     if (!session || session.expiresAt < Date.now()) {
       return res.status(404).json({ error: 'No active payment session for this amount' });
     }
 
-    // Track verification attempts
     session.verificationAttempts = (session.verificationAttempts || 0) + 1;
     if (session.verificationAttempts > 10) {
-      logger.warn('Excessive verification attempts', { 
+      logger.warn('Excessive verification attempts', {
         email: session.email,
         amount,
         txnRef: session.txnRef,
@@ -210,10 +189,9 @@ app.post('/payment-webhook', async (req, res) => {
       return res.status(429).json({ error: 'Too many verification attempts' });
     }
 
-    // Mark payment as successful in Firebase
     const transactionKey = `${source}_${identifier}`;
     const refDoc = db.collection('processed_transactions').doc(transactionKey);
-    
+
     await refDoc.set({
       source,
       processedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -225,57 +203,38 @@ app.post('/payment-webhook', async (req, res) => {
       status: 'completed'
     });
 
-    // Mark session as completed
     session.status = 'completed';
     session.completedAt = Date.now();
-    
-    // Log successful payment
-    await sendDiscordLog(`✅ ₹${amount} payment from ${sender || 'Google Pay'} → ${session.email}`);
-    logger.info('Payment processed', { 
-      email: session.email, 
-      amount, 
-      identifier,
-      source,
-      status: 'completed'
-    });
 
-    res.json({ 
-      success: true, 
-      email: session.email,
-      txnRef: session.txnRef,
-      status: 'completed'
-    });
+    await sendDiscordLog(`✅ ₹${amount} payment from ${sender || 'Google Pay'} → ${session.email}`);
+    logger.info('Payment processed', { email: session.email, amount, identifier, source, status: 'completed' });
+
+    res.json({ success: true, email: session.email, txnRef: session.txnRef, status: 'completed' });
   } catch (err) {
-    logger.error('Payment processing failed', { 
-      error: err.message, 
-      ...paymentDetails,
-      email: paymentSessions[amount]?.email 
-    });
+    logger.error('Payment processing failed', { error: err.message, ...paymentDetails, email: paymentSessions[amount]?.email });
     res.status(500).json({ error: 'Payment processing failed: ' + err.message });
   }
 });
 
-// 📦 Route: Poll Payment Status
+// 📦 Route: Check Payment Status
 app.post('/check-payment-status', async (req, res) => {
   const { email, amount, txnRef } = req.body;
-  
+
   if (!email || !amount || !txnRef) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  // Check active session
   const session = paymentSessions[amount];
   if (session && session.txnRef === txnRef) {
     if (session.status === 'completed') {
       return res.json({ success: true });
     }
-    return res.json({ 
+    return res.json({
       success: false,
       expiresIn: Math.ceil((session.expiresAt - Date.now()) / 1000)
     });
   }
 
-  // Check Firebase for completed payment
   try {
     const snap = await db.collection('processed_transactions')
       .where('email', '==', email)
@@ -287,25 +246,17 @@ app.post('/check-payment-status', async (req, res) => {
     if (!snap.empty) {
       return res.json({ success: true });
     }
-    
-    return res.json({ 
-      success: false,
-      message: 'No active payment session found'
-    });
+
+    return res.json({ success: false, message: 'No active payment session found' });
   } catch (err) {
-    logger.error('Payment status check failed', { 
-      error: err.message,
-      email,
-      amount,
-      txnRef
-    });
+    logger.error('Payment status check failed', { error: err.message, email, amount, txnRef });
     res.status(500).json({ error: 'Payment status check failed' });
   }
 });
 
 // 🧪 Health Check
 app.get('/health', (req, res) => {
-  res.json({ 
+  res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
